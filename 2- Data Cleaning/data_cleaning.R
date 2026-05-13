@@ -1,0 +1,162 @@
+# ============================================================
+# Data Cleaning — Milan Rental Market Project
+# Input:  final_dataset.csv, bikemi_stazioni.csv
+# Output: rentals_clean.csv, bikemi_clean.csv, milan_spatial_overview.png
+# ============================================================
+
+# 0. Read data
+
+rentals <- read.csv("/Users/kingachiang/Downloads/final_dataset.csv",
+                    fileEncoding = "UTF-8-BOM",
+                    stringsAsFactors = FALSE)
+
+bikemi <- read.csv("/Users/kingachiang/Downloads/bikemi_stazioni.csv",
+                   fileEncoding = "UTF-8-BOM",
+                   sep = ";",
+                   stringsAsFactors = FALSE)
+
+cat("Rentals raw:", nrow(rentals), "rows x", ncol(rentals), "cols\n")
+cat("Bikemi raw: ", nrow(bikemi),  "rows x", ncol(bikemi),  "cols\n")
+
+# same id scraped multiple times → remove duplicate listings
+
+rentals <- rentals[!duplicated(rentals$id), ]
+cat("After dedup:", nrow(rentals), "rows\n")
+
+# 1. price: " € 1,000.00 " → 1000
+
+rentals$price <- as.numeric(gsub("[€,\\s]", "", rentals$price_value, perl = TRUE))
+
+# 2. surface: "19 m²" → 19
+
+rentals$sqm <- as.numeric(gsub("[^0-9.]", "", rentals$surface))
+
+# 3. rooms: "5+" → 6, "" → NA
+
+rentals$n_rooms <- ifelse(rentals$rooms == "5+", 6,
+                   ifelse(rentals$rooms == "",   NA,
+                          as.numeric(rentals$rooms)))
+
+# 4. bathrooms: "3+" → 4, "" → NA
+
+rentals$n_bath <- ifelse(rentals$bathrooms == "3+", 4,
+                  ifelse(rentals$bathrooms == "",   NA,
+                         as.numeric(rentals$bathrooms)))
+
+# 5. floor: extract floor number + elevator flag
+#
+# Patterns in the data:
+#   "3°"                      → floor=3, elevator=0
+#   "3°, con ascensore"       → floor=3, elevator=1
+#   "4° piano, con ascensore" → floor=4, elevator=1
+#   "Piano terra"             → floor=0, elevator=0
+#   "Piano rialzato"          → floor=0.5 (raised ground)
+#   "Seminterrato"            → floor=-1
+#   "Interrato (-4)"          → floor=-4
+#   "Ammezzato"               → floor=0.5 (mezzanine)
+#   ""                        → NA (27% missing)
+
+parse_floor <- function(x) {
+  if (is.na(x) || x == "") return(c(floor_num = NA, has_elevator = NA))
+
+  elevator <- as.integer(grepl("ascensore", x, ignore.case = TRUE))
+
+  floor_num <- if (grepl("Seminterrato", x)) {
+    -1
+  } else if (grepl("Interrato", x)) {
+    m <- regmatches(x, regexpr("-?\\d+", x))
+    if (length(m) > 0) as.numeric(m) else -1
+  } else if (grepl("Piano terra", x, ignore.case = TRUE)) {
+    0
+  } else if (grepl("Piano rialzato", x, ignore.case = TRUE)) {
+    0.5
+  } else if (grepl("Ammezzato", x, ignore.case = TRUE)) {
+    0.5
+  } else {
+    m <- regmatches(x, regexpr("\\d+", x))
+    if (length(m) > 0) as.numeric(m) else NA
+  }
+
+  c(floor_num = floor_num, has_elevator = elevator)
+}
+
+floor_parsed <- t(sapply(rentals$floor, parse_floor))
+rentals$floor_num    <- as.numeric(floor_parsed[, "floor_num"])
+rentals$has_elevator <- as.integer(floor_parsed[, "has_elevator"])
+
+# 6. features → binary dummies
+
+feature_keys <- c("arredato", "balcone", "ascensore", "lavatrice",
+                  "aria condizionata", "portineria", "terrazzo",
+                  "giardino", "lavastoviglie")
+
+for (feat in feature_keys) {
+  col_name <- paste0("feat_", gsub(" ", "_", feat))
+  rentals[[col_name]] <- as.integer(grepl(feat, rentals$features, ignore.case = TRUE))
+}
+
+# 7. heating: already clean (Autonomo / Centralizzato / Assente)
+
+# 8. Drop columns not needed for modeling
+
+drop_cols <- c("title", "price_value", "price_formatted",
+               "rooms", "bathrooms", "surface", "floor", "features",
+               "address", "agency_name", "phone_number", "url", "description")
+
+rentals_clean <- rentals[, !(names(rentals) %in% drop_cols)]
+
+# 9. Bikemi: keep essentials
+
+bikemi_clean <- data.frame(
+  station_id   = bikemi$id_amat,
+  station_name = bikemi$nome,
+  capacity     = as.integer(bikemi$stalli),
+  lon          = as.numeric(bikemi$LONG_X_4326),
+  lat          = as.numeric(bikemi$LAT_Y_4326)
+)
+
+# 10. Sanity check
+
+cat("\n=== Cleaned rentals ===\n")
+cat("Dimensions:", nrow(rentals_clean), "x", ncol(rentals_clean), "\n")
+cat("Columns:\n ")
+cat(paste(names(rentals_clean), collapse = ", "), "\n\n")
+
+cat("NA counts:\n")
+na_counts <- colSums(is.na(rentals_clean))
+print(na_counts[na_counts > 0])
+
+cat("\nPrice range:", range(rentals_clean$price, na.rm = TRUE), "\n")
+cat("Sqm range:  ", range(rentals_clean$sqm,   na.rm = TRUE), "\n")
+cat("Floor range:", range(rentals_clean$floor_num, na.rm = TRUE), "\n")
+
+cat("\n=== Bikemi ===\n")
+cat("Stations:", nrow(bikemi_clean), "\n")
+
+# 11. Save
+
+write.csv(rentals_clean, "rentals_clean.csv", row.names = FALSE)
+write.csv(bikemi_clean,  "bikemi_clean.csv",  row.names = FALSE)
+cat("\nSaved: rentals_clean.csv, bikemi_clean.csv\n")
+
+# 12. EDA map: rentals + bikemi spatial overlay
+
+png("milan_spatial_overview.png", width = 1000, height = 1000, res = 150)
+
+plot(rentals_clean$longitude, rentals_clean$latitude,
+     pch = 16, cex = 0.4, col = rgb(0.2, 0.2, 0.8, 0.3),
+     xlab = "Longitude", ylab = "Latitude",
+     main = "Milan Rentals & BikeMi Stations")
+
+points(bikemi_clean$lon, bikemi_clean$lat,
+       pch = 17, cex = 0.8, col = rgb(0.9, 0.2, 0.1, 0.7))
+
+legend("topright",
+       legend = c(paste("Rentals (n =", nrow(rentals_clean), ")"),
+                  paste("BikeMi (n =",  nrow(bikemi_clean),  ")")),
+       pch = c(16, 17),
+       col = c(rgb(0.2, 0.2, 0.8, 0.7), rgb(0.9, 0.2, 0.1, 0.7)),
+       cex = 0.8)
+
+dev.off()
+cat("Saved: milan_spatial_overview.png\n")
