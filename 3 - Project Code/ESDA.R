@@ -42,7 +42,7 @@ clean_df %>% write_xlsx("milan_rent_clean.xlsx")
 
 ############################################
 
-
+Stanza singola via Pigello Portinari 2, Milano
 
 
 
