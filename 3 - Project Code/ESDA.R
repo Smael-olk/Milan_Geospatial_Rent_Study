@@ -12,33 +12,35 @@ library(stars)
 library(viridis)
 library(writexl)
 library(ggrepel) # Required for clear text labels
+library(gstat)
 # 1. Load data
-raw_path <- here("1 - Data Extraction", "final_dataset.csv")
-rent_data <- read_csv(raw_path)
+# raw_path <- here("1 - Data Extraction", "final_dataset.csv")
+clean_df <- read_csv("./treated_surface.csv")
+clean_df <- st_as_sf(clean_df, 
+                        coords = c("longitude", "latitude"), # Put the X (longitude) first!
+                        crs = 4326) # 4326 is the standard coordinate reference system for GPS lat/lon
 
-
-
-clean_df <- rent_data %>%
-  mutate(
-    price_n   = readr::parse_number(price_value),
-    surface_n = readr::parse_number(surface),
-    rooms_n   = readr::parse_number(rooms),
-    price_sqm = price_n / surface_n
-  ) %>%
-  # 1. REMOVE IMPOSSIBLE DATA (Global Outliers)
-  filter(
-    !is.na(latitude), 
-    !is.na(longitude),
-    price_n > 100,          # Remove fake/placeholder prices like €1
-    surface_n > 5,          # Remove impossible 1m2 rooms
-    price_sqm > 5,          # Min price in Milan periphery
-    price_sqm < 300         # Remove ultra-luxury penthouses (not for students)
-  )%>% select(-c(photo_count,url,description, phone_number,agency_name,price_value,price_formatted))
-  
+# clean_df <- rent_data %>%
+#   mutate(
+#     price_n   = readr::parse_number(price_value),
+#     surface_n = readr::parse_number(surface),
+#     rooms_n   = readr::parse_number(rooms),
+#     price_sqm = price_n / surface_n
+#   ) %>%
+#   # 1. REMOVE IMPOSSIBLE DATA (Global Outliers)
+#   filter(
+#     !is.na(latitude), 
+#     !is.na(longitude),
+#     price_n > 100,          # Remove fake/placeholder prices like €1
+#     surface_n > 5,          # Remove impossible 1m2 rooms
+#     price_sqm > 5,          # Min price in Milan periphery
+#     price_sqm < 300         # Remove ultra-luxury penthouses (not for students)
+#   )%>% select(-c(photo_count,url,description, phone_number,agency_name,price_value,price_formatted))
+#   
   
 #  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
 
-clean_df %>% write_xlsx("milan_rent_clean.xlsx")
+# clean_df %>% write_xlsx("milan_rent_clean.xlsx")
 
 ############################################
 
