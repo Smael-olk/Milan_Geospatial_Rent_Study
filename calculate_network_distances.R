@@ -222,6 +222,74 @@ rent_metric <- st_transform(rent_data_sf, 32632)
 mapview(rent_metric, zcol = "metro_density_500m", layer.name = "Metro density 500m") +
   mapview(metro_sf, col.regions = "red", cex = 3, layer.name = "metro stations")
 
+####750M
+# apply it to each room
+radius <- 750  # in meters
+
+rent_data$metro_density_750m <- mapply(
+  count_stations_within_radius,
+  rent_data$latitude,
+  rent_data$longitude,
+  MoreArgs = list(
+    stations_lat = metro$lat,
+    stations_lon = metro$lon,
+    radius_m = radius
+  )
+)
+
+
+summary(rent_data$metro_density_750m)
+
+
+# Transformer en sf
+metro_sf <- st_as_sf(metro, 
+                     coords = c("lon", "lat"), 
+                     crs = 4326) %>%
+  st_transform(32632)
+
+rent_data_sf <- st_as_sf(rent_data, 
+                         coords = c("longitude", "latitude"), 
+                         crs = 4326)
+
+rent_metric <- st_transform(rent_data_sf, 32632)
+
+mapview(rent_metric, zcol = "metro_density_750m", layer.name = "Metro density 750m") +
+  mapview(metro_sf, col.regions = "red", cex = 3, layer.name = "metro stations")
+
+####1000M
+# apply it to each room
+radius <- 1000  # in meters
+
+rent_data$metro_density_1000m <- mapply(
+  count_stations_within_radius,
+  rent_data$latitude,
+  rent_data$longitude,
+  MoreArgs = list(
+    stations_lat = metro$lat,
+    stations_lon = metro$lon,
+    radius_m = radius
+  )
+)
+
+
+summary(rent_data$metro_density_1000m)
+
+
+# Transformer en sf
+metro_sf <- st_as_sf(metro, 
+                     coords = c("lon", "lat"), 
+                     crs = 4326) %>%
+  st_transform(32632)
+
+rent_data_sf <- st_as_sf(rent_data, 
+                         coords = c("longitude", "latitude"), 
+                         crs = 4326)
+
+rent_metric <- st_transform(rent_data_sf, 32632)
+
+mapview(rent_metric, zcol = "metro_density_1000m", layer.name = "Metro density 1000m") +
+  mapview(metro_sf, col.regions = "red", cex = 3, layer.name = "metro stations")
+
 
 ###### TRY TO HAVE A MOBILITY SCORE 
 
@@ -363,6 +431,19 @@ mapview(rent_data_sf, zcol = "mobility_score", layer.name = "Mobility Score") +
   mapview(tram_sf, col.regions = "orange", cex = 2, layer.name = "Tram")
 
 
+
+## check correlation to choose the best radius for each transport mode
+# BikeMi
+cor(rent_data$price_sqm, rent_data$bikemi_density_100m, use = "complete.obs")
+cor(rent_data$price_sqm, rent_data$bikemi_density_200m, use = "complete.obs")
+cor(rent_data$price_sqm, rent_data$bikemi_density_500m, use = "complete.obs")
+cor(rent_data$price_sqm, rent_data$bikemi_density_750m, use = "complete.obs")
+
+# we choose 500m for Bikemi
+
+# Metro
+cor(rent_data$price_sqm, rent_data$metro_density_500m, use = "complete.obs")
+cor(rent_data$price_sqm, rent_data$metro_density_750m, use = "complete.obs")
 
 ### TO DO 
 # decide which radius to choose
