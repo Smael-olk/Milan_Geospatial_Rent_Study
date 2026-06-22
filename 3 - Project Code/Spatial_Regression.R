@@ -154,7 +154,7 @@ model_df_ready <- st_transform(model_df_jittered, 4326)
 
 # 1. Clean the data strictly 
 df_clean <- model_df_ready %>%
-  select(price_sqm, min_time_to_uni_mins, surface_room, heating, macrozone, geometry) %>%
+  select(price_sqm, min_time_to_uni_mins, surface_room, heating, macrozone, geometry,microzone) %>%
   # Drop traditional NAs
   na.omit() %>%
   # Remove rows with empty or missing map coordinates
@@ -185,3 +185,80 @@ sar_model_safe <- stsls(
 
 summary(sar_model_safe)
 
+sar_model_safe_macro <- stsls(
+  price_sqm ~ min_time_to_uni_mins + surface_room + as.factor(heating)+as.factor(macrozone), 
+  data = df_clean, 
+  listw = listw_clean, 
+  zero.policy = TRUE
+)
+
+summary(sar_model_safe_macro)
+
+
+# 1. Extract the coefficients from your model
+rho <- sar_model_safe_macro$coefficients["Rho"]
+beta <- sar_model_safe_macro$coefficients[-1] # Everything except Rho
+
+# 2. Get the X matrix (your design matrix of predictors)
+X <- model.matrix(price_sqm ~ min_time_to_uni_mins + surface_room + as.factor(heating)+as.factor(macrozone), data = df_clean)
+
+# 3. Calculate the spatial lag of the dependent variable using the explicit package path
+WY <- spdep::lag.listw(listw_clean, df_clean$price_sqm, zero.policy = TRUE)
+
+# 4. Compute the prediction: (Rho * WY) + (X * Beta)
+df_clean$predicted_price <- as.numeric((rho * WY) + (X %*% beta))
+
+# View actual vs predicted
+head(df_clean %>% dplyr::select(price_sqm, predicted_price))
+
+df_clean <- df_clean %>%
+  filter(price_sqm >= 10 & price_sqm <= 50)
+
+# 1. Calculate the raw prediction errors
+actuals <- df_clean$price_sqm
+predictions <- df_clean$predicted_price
+errors <- actuals - predictions
+
+# 2. Compute Mean Absolute Error (MAE)
+mae <- mean(abs(errors))
+
+# 3. Compute Root Mean Squared Error (RMSE)
+rmse <- sqrt(mean(errors^2))
+
+# 4. Compute Mean Absolute Percentage Error (MAPE)
+mape <- mean(abs(errors) / actuals) * 100
+
+# Print the scorecard
+print("--- MODEL PERFORMANCE SCORECARD ---")
+print(paste("MAE : €", round(mae, 2), "per sqm"))
+print(paste("RMSE: €", round(rmse, 2), "per sqm"))
+print(paste("MAPE:", round(mape, 2), "% average error"))
+
+# 1. Define your new property's attributes
+new_apartment_data <- data.frame(
+  min_time_to_uni_mins = 12.5,
+  surface_room = 18,
+  heating = "Centralizzato",
+  macrozone = "Udine, Lambrate"
+)
+
+# 2. Create the X vector matching the exact structure of your model's coefficients
+# (Intercept = 1, min_time = 12.5, surface = 18, Autonomo = 0, Centralizzato = 1)
+X_new <- c(1, 12.5, 18, 0, 1) 
+
+# 3. Create a proper spatial point for the new coordinates (WGS84)
+new_point <- st_sfc(st_point(c(9.2250, 45.4780)), crs = 4326)
+
+# 4. Calculate distances to all existing apartments to find its neighbors
+distances <- st_distance(new_point, df_clean)
+
+# 5. Grab the indices of the 5 closest existing properties
+closest_indices <- order(distances)[1:5]
+
+# 6. Calculate WY_new: the average price of those 5 nearest neighbors
+WY_new <- mean(df_clean$price_sqm[closest_indices])
+
+# 7. Compute the final spatial prediction: (Rho * WY_new) + Sum(X_new * Beta)
+predicted_price_new <- as.numeric((rho * WY_new) + sum(X_new * beta))
+
+print(paste("Predicted Price per SQM for the new apartment:", round(predicted_price_new, 2)))
