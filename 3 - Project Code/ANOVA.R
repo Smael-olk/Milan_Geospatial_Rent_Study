@@ -18,24 +18,37 @@ library(car)
 # raw_path <- here("1 - Data Extraction", "final_dataset.csv")
 clean_df <- read_csv("./treated_surface.csv") %>% select(-c(title,features,address,surface_n))
 clean_df <- clean_df[!is.na(clean_df$macrozone), ]
+clean_df <- clean_df %>%
+  filter(!is.na(price_sqm)) %>%
+  filter(price_sqm > 10 & price_sqm < 50)
 
 # MANOVA taking into account correlation between price_n and surface of room
 manova_macro <- manova(cbind(price_n, surface_room) ~ macrozone, data = clean_df)
 summary(manova_macro)
-
-manova_heating <- manova(cbind(price_n, surface_room) ~ heating, data = clean_df)
-summary(manova_heating)
-
 
 
 # ANOVA model on MacroZone
 model <- lm(price_sqm ~ macrozone, data = clean_df)
 Anova(model, type = 2)
 
+par(mfrow = c(1, 2)) 
+plot(model, 1, main = "Homoscedasticity") 
+plot(model, 2, main = "Normality")
 
-# ANOVA model on MicroZone
-model <- lm(price_sqm ~ microzone, data = clean_df)
-Anova(model, type = 2)
+oneway.test(price_sqm ~ macrozone, data = clean_df, var.equal = FALSE)
+
+
+# Create a new model predicting the LOG of the price
+model_log <- lm(log(price_sqm) ~ macrozone, data = clean_df)
+
+# Check the diagnostics on this new model
+par(mfrow = c(1, 2))
+plot(model_log, 1, main = "Homoscedasticity (Log)")
+plot(model_log, 2, main = "Normality (Log)")
+par(mfrow = c(1, 1))
+
+# Run your standard ANOVA on the log model
+Anova(model_log, type = 2)
 
 
 

@@ -2,27 +2,23 @@
 #  MILAN STUDENT HOUSING SPATIAL ANALYSIS
 # ==============================================================================
 
-
 #Bypass strict Windows SSL checks if OSRM throws errors again
 Sys.setenv(CURL_SSL_BACKEND = "openssl")
-
-
 # 0. Load Libraries
 library(sf)
+library(tidyverse)
+library(ggplot2)
 library(tidyverse)
 library(spdep)        # For spatial weights
 library(spatialreg)   # For Spatial Autoregressive Models (SAR)
 library(GWmodel)      # For Geographically Weighted Regression (GWR)
 library(osrm)         # For street network routing
 library(mapview)      # For interactive mapping
-
-
+library(car)          # NEW: For Multicollinearity (VIF) and Levene's Tests
 
 # Load your cleaned data (Assuming it's already an sf object in CRS 4326)
 clean_df <- read_csv("./treated_surface.csv") %>% select(-c(title,features,address,surface_n)) %>% 
-    st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
-
-
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
 
 # ==============================================================================
 # PART 0: ENGINEER Transit FEATURES 
@@ -136,7 +132,7 @@ print("Applying micro-jitter to prevent zero-distance errors...")
 model_df <- st_as_sf(
   model_df, 
   coords = c("longitude", "latitude"), 
-  crs = 4326                          
+  crs = 4326                                  
 )
 # Transform to a metric CRS (Milan UTM = 32632) to jitter by meters
 model_df_m <- st_transform(model_df, 32632)
@@ -160,7 +156,9 @@ df_clean <- model_df_ready %>%
   # Remove rows with empty or missing map coordinates
   filter(!st_is_empty(geometry)) %>%
   # Remove any mathematically invalid numbers (NaN or Inf)
-  filter(is.finite(price_sqm) & is.finite(min_time_to_uni_mins) & is.finite(surface_room))
+  filter(is.finite(price_sqm) & is.finite(min_time_to_uni_mins) & is.finite(surface_room)) %>%
+  filter(price_sqm >= 10 & price_sqm <= 55)
+
 
 # 2. THE DIAGNOSTIC CHECK
 n_rows_data <- nrow(df_clean)
@@ -194,6 +192,13 @@ sar_model_safe_macro <- stsls(
 
 summary(sar_model_safe_macro)
 
+res <- residuals(sar_model_safe_macro)
+qqnorm(res, main = "Normal Q-Q Plot of Residuals")
+qqline(res, col = "red", lwd = 2)
+
+# Or look at a histogram
+hist(res, breaks = 50, main = "Histogram of Residuals", xlab = "Residuals")
+
 
 # 1. Extract the coefficients from your model
 rho <- sar_model_safe_macro$coefficients["Rho"]
@@ -211,8 +216,6 @@ df_clean$predicted_price <- as.numeric((rho * WY) + (X %*% beta))
 # View actual vs predicted
 head(df_clean %>% dplyr::select(price_sqm, predicted_price))
 
-df_clean <- df_clean %>%
-  filter(price_sqm >= 10 & price_sqm <= 50)
 
 # 1. Calculate the raw prediction errors
 actuals <- df_clean$price_sqm
@@ -262,3 +265,237 @@ WY_new <- mean(df_clean$price_sqm[closest_indices])
 predicted_price_new <- as.numeric((rho * WY_new) + sum(X_new * beta))
 
 print(paste("Predicted Price per SQM for the new apartment:", round(predicted_price_new, 2)))
+
+
+library(ggplot2)
+library(dplyr)
+
+# 1. Build the dataframe using your exact estimates and standard errors
+coef_data <- data.frame(
+  Variable = c(
+    "Commute: Walk to Uni (mins)", 
+    "Size: Extra Square Meter", 
+    "Heating: Independent vs None", 
+    "Heating: Central vs None"
+  ),
+  Estimate = c(-0.0153, -1.3751, 3.1874, 5.8195),
+  StdError = c(0.0079,  0.0678,  0.7729, 0.7170)
+)
+
+# 2. Calculate the 95% Confidence Intervals
+coef_data <- coef_data %>%
+  mutate(
+    conf.low = Estimate - 1.96 * StdError,
+    conf.high = Estimate + 1.96 * StdError
+  )
+
+# 3. Generate the Poster Plot
+forest_plot <- ggplot(coef_data, aes(x = Estimate, y = reorder(Variable, Estimate))) +
+  # Draw the red "Zero Effect" baseline
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  # Draw the estimates and error bars
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high), color = "darkcyan", size = 1.2, linewidth = 1.5) +
+  theme_minimal(base_size = 14) + 
+  labs(
+    title = "Financial Impact of Property Features in Milan",
+    subtitle = "How much each trait adds or subtracts from the baseline price per m² (95% CI)",
+    x = "Impact on Rent Price (€/m²)",
+    y = ""
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold"),
+    panel.grid.minor = element_blank() # Cleans up the background for a poster
+  )
+
+# Force RStudio to display the plot
+print(forest_plot)
+
+
+
+
+
+
+# ==============================================================================
+# PART 4: ADVANCED SPATIAL ANALYSES (NEWLY ADDED)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# A. Multicollinearity Check (VIF)
+# ------------------------------------------------------------------------------
+cat("\n--- Running Multicollinearity Check (VIF) ---\n")
+# VIF is calculated on standard OLS models. We map your SAR model to OLS.
+ols_macro_check <- lm(
+  price_sqm ~ min_time_to_uni_mins + surface_room + as.factor(heating) + as.factor(macrozone), 
+  data = df_clean
+)
+vif_results <- vif(ols_macro_check)
+print(vif_results)
+# Rule of thumb: If GVIF^(1/(2*Df)) is > 2.23 (which translates to a standard VIF > 5), 
+# you have high multicollinearity.
+
+# ------------------------------------------------------------------------------
+# B. Interaction Terms (Variable Slopes)
+# ------------------------------------------------------------------------------
+cat("\n--- Running OLS with Interaction Terms ---\n")
+# Testing if the value of a square meter changes based on WHICH macrozone it's in
+interaction_model <- lm(
+  price_sqm ~ min_time_to_uni_mins + as.factor(heating) + surface_room * as.factor(macrozone), 
+  data = df_clean
+)
+# Look at the bottom of the summary for "surface_room:as.factor(macrozone)..."
+# If those p-values are < 0.05, the price per sq meter is fundamentally different per zone.
+summary(interaction_model)
+
+# 1. Convert the model summary into a searchable dataframe
+coef_table <- as.data.frame(summary(interaction_model)$coefficients)
+colnames(coef_table) <- c("Estimate", "StdError", "t_value", "p_value")
+
+# 2. Filter for only the interaction terms where p < 0.05
+significant_macrozones <- coef_table %>%
+  rownames_to_column("Variable") %>%
+  filter(grepl("surface_room:as.factor\\(macrozone\\)", Variable)) %>%
+  filter(p_value < 0.05)
+
+# View the isolated list
+print(significant_macrozones)
+
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(stringr) # Needed to clean up the text labels
+
+# 1. Prepare your existing 'significant_macrozones' data
+plot_data <- significant_macrozones %>%
+  mutate(
+    # Strip out the ugly R syntax to leave just the neighborhood names
+    Macrozone = str_remove(Variable, "surface_room:as.factor\\(macrozone\\)"),
+    
+    # Calculate 95% Confidence Intervals
+    Lower_CI = Estimate - (1.96 * StdError),
+    Upper_CI = Estimate + (1.96 * StdError),
+    
+    # Reorder Macrozone by Estimate for that clean "staircase" look
+    Macrozone = reorder(Macrozone, Estimate)
+  )
+
+# 2. Build the poster-ready plot
+ggplot(plot_data, aes(x = Estimate, y = Macrozone)) +
+  # Add a dashed line at 0 (the line of no effect)
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) +
+  
+  # Add the points and error bars
+  geom_pointrange(aes(xmin = Lower_CI, xmax = Upper_CI), 
+                  color = "#2c3e50", size = 1.2, linewidth = 1.2) +
+  
+  # Clean up labels and titles
+  labs(
+    title = "Effect of Room Surface Area on Price",
+    subtitle = "By Milan Macrozone (95% Confidence Intervals)",
+    x = "Effect Size (Estimate)",
+    y = NULL # Removed because the zone names speak for themselves
+  ) +
+  
+  # Apply a clean theme tailored for poster readability from a distance
+  theme_minimal(base_size = 18) + 
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(b = 10)),
+    plot.subtitle = element_text(color = "gray30", margin = margin(b = 20)),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(), # Removes horizontal lines behind the text
+    axis.text.y = element_text(face = "bold", color = "black"),
+    axis.title.x = element_text(margin = margin(t = 15))
+  )
+
+
+# ------------------------------------------------------------------------------
+# C. Hotspot Analysis (Local Moran's I / LISA)
+# ------------------------------------------------------------------------------
+cat("\n--- Running Local Moran's I (Hotspot Analysis) ---\n")
+
+# Calculate local Moran's I for each apartment
+local_moran <- localmoran(df_clean$price_sqm, listw_clean)
+
+# Scale prices and spatially lagged prices to center around 0
+df_clean$z_price <- as.numeric(scale(df_clean$price_sqm))
+df_clean$lag_z_price <- as.numeric(lag.listw(listw_clean, df_clean$z_price, zero.policy = TRUE))
+
+# Extract the p-value from the Local Moran results (Column 5)
+pval <- local_moran[, 5]
+
+# Classify into quadrants (only keeping statistically significant ones, p <= 0.05)
+df_clean$lisa_cluster <- "Not Significant"
+df_clean$lisa_cluster[df_clean$z_price > 0 & df_clean$lag_z_price > 0 & pval <= 0.05] <- "High-High (Hotspot)"
+df_clean$lisa_cluster[df_clean$z_price < 0 & df_clean$lag_z_price < 0 & pval <= 0.05] <- "Low-Low (Coldspot)"
+df_clean$lisa_cluster[df_clean$z_price > 0 & df_clean$lag_z_price < 0 & pval <= 0.05] <- "High-Low (Outlier)"
+df_clean$lisa_cluster[df_clean$z_price < 0 & df_clean$lag_z_price > 0 & pval <= 0.05] <- "Low-High (Outlier)"
+
+# View how many apartments fall into each cluster
+print(table(df_clean$lisa_cluster))
+
+
+
+ggplot(data = df_clean) +
+  geom_sf(aes(color = lisa_cluster), size = 1.5, alpha = 0.8) +
+  scale_color_manual(values = c(
+    "High-High (Hotspot)" = "red", 
+    "Low-Low (Coldspot)" = "blue", 
+    "High-Low (Outlier)" = "pink", 
+    "Low-High (Outlier)" = "lightblue", 
+    "Not Significant" = "grey80"
+  )) +
+  theme_minimal() +
+  labs(title = "Milan Rental Hotspots (LISA Clusters)", color = "Cluster Type")
+
+
+# ------------------------------------------------------------------------------
+# D. Geographically Weighted Regression (GWR)
+# ------------------------------------------------------------------------------
+cat("\n--- Running Geographically Weighted Regression (GWR) ---\n")
+# Note: GWR struggles heavily with categorical/dummy variables (like macrozone or heating)
+# because local neighborhoods might only have 1 category, causing matrix failure.
+# We will run GWR only on our continuous numeric variables.
+
+# Convert sf to standard Spatial object for GWmodel
+df_sp <- as(df_clean, "Spatial")
+
+print("Calculating optimal GWR bandwidth... (This may take a minute or two)")
+# 1. Calculate Adaptive Bandwidth
+gwr_bw <- bw.gwr(
+  price_sqm ~ min_time_to_uni_mins + surface_room, 
+  data = df_sp, 
+  approach = "AICc", 
+  kernel = "bisquare", 
+  adaptive = TRUE
+)
+
+print(paste("Optimal bandwidth (number of nearest neighbors) chosen:", gwr_bw))
+
+# 2. Run the actual GWR model
+gwr_model <- gwr.basic(
+  price_sqm ~ min_time_to_uni_mins + surface_room, 
+  data = df_sp, 
+  bw = gwr_bw, 
+  kernel = "bisquare", 
+  adaptive = TRUE
+)
+
+# 3. Print the GWR Summary
+print(gwr_model)
+
+# 4. Extract local coefficients back to our dataframe for mapping
+df_clean$gwr_coef_surface <- gwr_model$SDF$surface_room
+df_clean$gwr_coef_uni_time <- gwr_model$SDF$min_time_to_uni_mins
+
+# Plot exactly where proximity to the university drives up price the most:
+ggplot(data = df_clean) +
+  geom_sf(aes(color = gwr_coef_uni_time), size = 1.5) +
+  scale_color_viridis_c(option = "magma", direction = -1) +
+  theme_minimal() +
+  labs(
+    title = "GWR: Local Impact of University Proximity", 
+    subtitle = "Darker colors = higher penalty per minute of walking",
+    color = "Effect (Coef)"
+  )
+

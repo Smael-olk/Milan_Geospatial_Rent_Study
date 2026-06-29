@@ -13,12 +13,17 @@ library(viridis)
 library(writexl)
 library(ggrepel) # Required for clear text labels
 library(gstat)
+library(units) # For clean distance unit handling
 # 1. Load data
 # raw_path <- here("1 - Data Extraction", "final_dataset.csv")
 clean_df <- read_csv("./treated_surface.csv")
 clean_df <- st_as_sf(clean_df, 
                         coords = c("longitude", "latitude"), # Put the X (longitude) first!
                         crs = 4326) # 4326 is the standard coordinate reference system for GPS lat/lon
+
+clean_df <- clean_df %>%
+  filter(!is.na(price_sqm)) %>%
+  filter(price_sqm > 10 & price_sqm < 50)
 
 # clean_df <- rent_data %>%
 #   mutate(
@@ -82,7 +87,7 @@ mapview(df_smoothed,
 # 1. Clean data: Remove NAs and extreme outliers
 rent_ready <- rent_metric %>%
   filter(!is.na(price_sqm)) %>%
-  filter(price_sqm > 5 & price_sqm < 150)
+  filter(price_sqm > 10 & price_sqm < 50)
 
 # 2. Create a much FINER grid (Higher resolution)
 # 50m cells instead of 100m will make it look much smoother
@@ -105,23 +110,59 @@ ggplot() +
 ################################################################################
 
 
-# Define the center of Milan (Duomo)
-duomo <- st_sfc(st_point(c(9.1899, 45.4642)), crs = 4326) %>% 
-  st_transform(32632) # Transform to meters
 
-# Transform your data to meters too
+
+# 1. Define the key Milan locations (Longitude, Latitude)
+milan_hubs <- data.frame(
+  hub_name = c("Duomo", "Città Studi (Polimi)"),
+  lon = c(9.1899,  9.2273),
+  lat = c(45.4642,  45.4782)
+)
+
+# 2. Convert hubs to an 'sf' object and transform to metric (EPSG:32632)
+hubs_sf <- st_as_sf(milan_hubs, coords = c("lon", "lat"), crs = 4326) %>% 
+  st_transform(32632)
+
+# Transform your rental data to metric (assuming clean_df exists)
 rent_metric <- st_transform(clean_df, 32632)
 
-# Calculate distance in kilometers
-rent_metric$dist_to_cbd <- as.numeric(st_distance(rent_metric, duomo)) / 1000
+# 3. Calculate distance from every property to EVERY hub
+# st_distance returns a matrix: rows = properties, cols = hubs
+dist_matrix <- st_distance(rent_metric, hubs_sf)
 
-# Plot the relationship
-ggplot(rent_metric, aes(x = dist_to_cbd, y = price_sqm)) +
-  geom_point(alpha = 0.3, color = "steelblue") +
-  geom_smooth(method = "gam") +
-  labs(title = "Rent Decay: Price/m² vs Distance to Duomo",
-       x = "Distance (km)", y = "€ / m²")
+# Drop the "units" class to make it standard numeric, and convert to km
+dist_matrix_km <- drop_units(dist_matrix) / 1000
 
+# 4. Convert the matrix to a dataframe and name the columns
+dist_df <- as.data.frame(dist_matrix_km)
+colnames(dist_df) <- hubs_sf$hub_name
+
+# Bind these new distance columns back to the original dataset
+rent_with_dists <- bind_cols(rent_metric, dist_df)
+
+# 5. Reshape data into "long" format for ggplot 
+# (This stacks the distances so we can plot them side-by-side)
+rent_long <- rent_with_dists %>%
+  st_drop_geometry() %>% # Drop geometry to speed up ggplot heavily
+  pivot_longer(
+    cols = all_of(hubs_sf$hub_name), 
+    names_to = "hub", 
+    values_to = "distance_km"
+  )
+
+# 6. Plot the relationships using facet_wrap
+ggplot(rent_long, aes(x = distance_km, y = price_sqm)) +
+  geom_point(alpha = 0.2, color = "steelblue", size = 1) +
+  geom_smooth(method = "gam", color = "darkorange", linewidth = 1) +
+  facet_wrap(~ hub, scales = "free_x") + # Creates a separate graph for each hub
+  labs(
+    title = "Rent Decay in Milan: Price/m² vs Distance to Key Hubs",
+    x = "Distance to Hub (km)", 
+    y = "€ / m²"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 11))
+################################################################################
 
 zone_analysis <- clean_df %>%
   st_drop_geometry() %>% 
@@ -161,7 +202,7 @@ head(zone_gap)
 
 
 # Identify the 10 macrozones with the most internal price variation
-top_10_varied <- zone_gap %>% slice_max(price_range, n = 10) %>% pull(macrozone)
+top_10_varied <- zone_gap %>% slice_max(price_range, n = 15) %>% pull(macrozone)
 
 clean_df %>%
   filter(macrozone %in% top_10_varied) %>%
@@ -171,7 +212,7 @@ clean_df %>%
   coord_flip() +
   theme_minimal() +
   theme(legend.position = "none") + # Hide legend because there are too many microzones
-  labs(title = "Top 10 Macrozones with Widest Price Gaps",
+  labs(title = "Price per sqm distribution of Milan Macrozones",
        subtitle = "Dots represent individual listings colored by Microzone",
        x = "Macrozone", y = "Price per sqm")
 
